@@ -2071,6 +2071,15 @@ float amp_combine_controls(float *controls, float *coefs) {
     return result;
 }
 
+// A mod source's value for this block, without advancing it: hold_and_modify(osc) already did, and
+// compute_mod_value memoizes it per block.
+static float mod_value_this_block(uint16_t osc, uint16_t which_source) {
+    uint16_t source = synth[osc]->mod_source[which_source];
+    if (AMY_IS_SET(source) && source != osc && synth[source] != NULL)
+        return S2F(compute_mod_value(source));
+    return 0;
+}
+
 // Evaluate amplitude at a sample offset, including an onset inside a PCM block.
 float compute_amp(uint16_t osc, uint16_t sample_offset) {
     float ctrl_inputs[NUM_COMBO_COEFS];
@@ -2079,8 +2088,8 @@ float compute_amp(uint16_t osc, uint16_t sample_offset) {
     ctrl_inputs[COEF_VEL] = synth[osc]->velocity;
     ctrl_inputs[COEF_EG0] = S2F(compute_breakpoint_scale(osc, 0, sample_offset));
     ctrl_inputs[COEF_EG1] = S2F(compute_breakpoint_scale(osc, 1, sample_offset));
-    ctrl_inputs[COEF_MOD0] = S2F(compute_mod_scale(osc, 0));
-    ctrl_inputs[COEF_MOD1] = S2F(compute_mod_scale(osc, 1));
+    ctrl_inputs[COEF_MOD0] = mod_value_this_block(osc, 0);
+    ctrl_inputs[COEF_MOD1] = mod_value_this_block(osc, 1);
     ctrl_inputs[COEF_BEND] = amy_global.pitch_bend;
     ctrl_inputs[COEF_EXT0] = cv_inputs[0];
     ctrl_inputs[COEF_EXT1] = cv_inputs[1];

@@ -498,7 +498,10 @@ static SAMPLE render_pcm_stretch(SAMPLE *buf, uint16_t osc, memorypcm_preset_t *
     // Per-sample read step within a grain: the pitch, recomputed per block so
     // envelopes/LFOs on freq keep working.
     uint32_t pitch_step_q16 = (uint32_t)((playback_freq / (float)AMY_SAMPLE_RATE) * 65536.0f);
-    SAMPLE amp = F2S(msynth[osc]->amp);
+    // Ramp the gain across the block, as render_pcm does.
+    SAMPLE amp = F2S(msynth[osc]->last_amp);
+    SAMPLE amp_step = SHIFTR(F2S(msynth[osc]->amp) - amp, BLOCK_SIZE_BITS);
+    msynth[osc]->last_amp = msynth[osc]->amp;
     const LUTSAMPLE *table = preset->sample_ram;
     uint32_t length = preset->length;
     // Re-read each block, so 'pS' can be swept while the note is sounding.
@@ -512,6 +515,7 @@ static SAMPLE render_pcm_stretch(SAMPLE *buf, uint16_t osc, memorypcm_preset_t *
         i = msynth[osc]->pcm_delay;
         msynth[osc]->pcm_delay = 0;
     }
+    amp += amp_step * i;
     for (; i < AMY_BLOCK_SIZE; i++) {
         if (st->hop_counter == 0)
             pcm_stretch_spawn(st, preset, synth[osc]->wave, looping, loopstart, loopend, search);
@@ -542,6 +546,7 @@ static SAMPLE render_pcm_stretch(SAMPLE *buf, uint16_t osc, memorypcm_preset_t *
             break;
         }
         SAMPLE value = buf[i] + MUL4_SS(amp, out);
+        amp += amp_step;
         buf[i] = value;
         if (value < 0) value = -value;
         if (value > max_value) max_value = value;
@@ -727,8 +732,10 @@ SAMPLE render_pcm(SAMPLE* buf, uint16_t osc) {
         SAMPLE amp_step = (F2S(msynth[osc]->amp) - amp) / AMY_BLOCK_SIZE;
         PHASOR step = F2P((playback_freq / (float)AMY_SAMPLE_RATE) / (float)(1 << (PCM_INDEX_BITS - PCM_INDEX_STEP_EXTRA_BITS)));
         if (preset->type != AMY_PCM_TYPE_FILE && msynth[osc]->state == PCM_LOOP_ONCE_INTERNAL) {
-            amp = F2S(msynth[osc]->pcm_retrigger_amp);
-            amp_step = 0;
+            // Old waveform, waiting for its zero crossing: it keeps its own gain, but a note-off releases it.
+            if (AMY_IS_SET(synth[osc]->note_off_clock) && msynth[osc]->amp < msynth[osc]->pcm_retrigger_amp)
+                msynth[osc]->pcm_retrigger_amp = msynth[osc]->amp;
+            amp_step = SHIFTR(F2S(msynth[osc]->pcm_retrigger_amp) - amp, BLOCK_SIZE_BITS);
         }
         const LUTSAMPLE* table = preset->sample_ram;
         uint32_t base_index_base = INT_OF_P(synth[osc]->phase, PCM_INDEX_BITS);
