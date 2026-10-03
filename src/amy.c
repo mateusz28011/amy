@@ -1038,6 +1038,7 @@ void reset_modosc(struct mod_synthinfo *pmsynth) {
         pmsynth->dist_mix = 1.0f;
         pmsynth->state = 0;
         pmsynth->pcm_delay = 0;
+        pmsynth->pcm_retrigger_amp = 0;
     }
 }
 
@@ -2068,6 +2069,22 @@ float amp_combine_controls(float *controls, float *coefs) {
     result = S2F(exp2_lut(F2S(result * 3.321928094887362f)));
     if (result <= AMP_THRESH_PLUS)  result = 0;
     return result;
+}
+
+// Evaluate amplitude at a sample offset, including an onset inside a PCM block.
+float compute_amp(uint16_t osc, uint16_t sample_offset) {
+    float ctrl_inputs[NUM_COMBO_COEFS];
+    ctrl_inputs[COEF_CONST] = 1.0f;
+    ctrl_inputs[COEF_NOTE] = (AMY_IS_SET(synth[osc]->midi_note)) ? logfreq_for_midi_note(synth[osc]->midi_note) : 0;
+    ctrl_inputs[COEF_VEL] = synth[osc]->velocity;
+    ctrl_inputs[COEF_EG0] = S2F(compute_breakpoint_scale(osc, 0, sample_offset));
+    ctrl_inputs[COEF_EG1] = S2F(compute_breakpoint_scale(osc, 1, sample_offset));
+    ctrl_inputs[COEF_MOD0] = S2F(compute_mod_scale(osc, 0));
+    ctrl_inputs[COEF_MOD1] = S2F(compute_mod_scale(osc, 1));
+    ctrl_inputs[COEF_BEND] = amy_global.pitch_bend;
+    ctrl_inputs[COEF_EXT0] = cv_inputs[0];
+    ctrl_inputs[COEF_EXT1] = cv_inputs[1];
+    return amp_combine_controls(ctrl_inputs, synth[osc]->amp_coefs);
 }
 
 // apply an mod & bp, if any, to the osc

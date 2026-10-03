@@ -586,11 +586,15 @@ void pcm_note_on(uint16_t osc) {
             && preset->type != AMY_PCM_TYPE_FILE
             && preset->sample_ram != NULL && preset->length > 0;
         bool fresh_start = true;
+        float old_amp = (msynth[osc]->state == PCM_LOOP_ONCE_INTERNAL)
+            ? msynth[osc]->pcm_retrigger_amp : msynth[osc]->amp;
         if (synth[osc]->status == SYNTH_AUDIBLE && preset->type != AMY_PCM_TYPE_FILE
-            && !want_stretch && !synth[osc]->stretch.active) {
+            && !want_stretch && !synth[osc]->stretch.active && old_amp > AMP_THRESH_PLUS) {
             // Restarting a currently-playing (non-file) PCM, delay reonset to next zero crossing to avoid click.
             // (Not for the fit engine: its grains are windowed, so a restart is click-free by construction.)
+            // Keep the preceding tail's amplitude until reonset; a silent tail restarts immediately.
             fresh_start = false;
+            msynth[osc]->pcm_retrigger_amp = old_amp;
             uint32_t base_index = INT_OF_P(synth[osc]->phase, PCM_INDEX_BITS);
             msynth[osc]->loopend = pcm_find_next_zero_crossing(osc, base_index);
             msynth[osc]->loopstart = INT_OF_P(phase, PCM_INDEX_BITS);;
@@ -716,8 +720,16 @@ SAMPLE render_pcm(SAMPLE* buf, uint16_t osc) {
             return 0;
         }
 
-        SAMPLE amp = F2S(msynth[osc]->amp);
+        // msynth amp is the envelope at the END of this block and last_amp the value it rendered at the end
+        // of the previous one; ramp between them across the block, as the table oscillators do (render_lut),
+        // so an envelope change is a slope rather than a once-per-block step in the gain.
+        SAMPLE amp = F2S(msynth[osc]->last_amp);
+        SAMPLE amp_step = (F2S(msynth[osc]->amp) - amp) / AMY_BLOCK_SIZE;
         PHASOR step = F2P((playback_freq / (float)AMY_SAMPLE_RATE) / (float)(1 << (PCM_INDEX_BITS - PCM_INDEX_STEP_EXTRA_BITS)));
+        if (preset->type != AMY_PCM_TYPE_FILE && msynth[osc]->state == PCM_LOOP_ONCE_INTERNAL) {
+            amp = F2S(msynth[osc]->pcm_retrigger_amp);
+            amp_step = 0;
+        }
         const LUTSAMPLE* table = preset->sample_ram;
         uint32_t base_index_base = INT_OF_P(synth[osc]->phase, PCM_INDEX_BITS);
         uint32_t base_index = base_index_base;
@@ -729,6 +741,7 @@ SAMPLE render_pcm(SAMPLE* buf, uint16_t osc) {
             start_i = msynth[osc]->pcm_delay;
             msynth[osc]->pcm_delay = 0;
         }
+        amp += amp_step * start_i;
         for(uint16_t i=start_i; i < AMY_BLOCK_SIZE; i++) {
             SAMPLE frac = S_FRAC_OF_P(phase, PCM_INDEX_BITS - PCM_INDEX_STEP_EXTRA_BITS);
             LUTSAMPLE b = 0;
@@ -749,6 +762,12 @@ SAMPLE render_pcm(SAMPLE* buf, uint16_t osc) {
                         msynth[osc]->state = msynth[osc]->next_state;  // Only loops once.
                         msynth[osc]->loopstart = preset->loopstart;
                         msynth[osc]->loopend = preset->loopend;
+                        // Start the new envelope with the new waveform, not with the old tail.
+                        if (AMY_IS_SET(synth[osc]->note_on_clock))
+                            synth[osc]->note_on_clock = amy_global.total_samples + i;
+                        msynth[osc]->amp = compute_amp(osc, AMY_BLOCK_SIZE);
+                        amp = F2S(msynth[osc]->amp);
+                        amp_step = 0;
                     }
                     //fprintf(stderr, "time %.3f sample %d LOOP: old_index %d new_index %d phase 0x%lx\n", amy_global.time, i, base_index, base_index_base, phase);
                     base_index = base_index_base;
@@ -785,12 +804,15 @@ SAMPLE render_pcm(SAMPLE* buf, uint16_t osc) {
             }
             SAMPLE sample = L2S(b) + MUL4_SS(L2S(c - b), frac);
             SAMPLE value = buf[i] + MUL4_SS(amp, sample);
+            amp += amp_step;
             buf[i] = value;   
             if (value < 0) value = -value;
             if (value > max_value) max_value = value;  
             phase = P_WRAPPED_SUM(phase, step);
             base_index = base_index_base + INT_OF_P(phase, PCM_INDEX_BITS - PCM_INDEX_STEP_EXTRA_BITS);
         }
+        msynth[osc]->last_amp = (preset->type != AMY_PCM_TYPE_FILE && msynth[osc]->state == PCM_LOOP_ONCE_INTERNAL)
+            ? msynth[osc]->pcm_retrigger_amp : msynth[osc]->amp;
         //synth[osc]->phase = phase;
         synth[osc]->phase = I2P(base_index, PCM_INDEX_BITS) + (S_FRAC_OF_P(phase, PCM_INDEX_BITS - PCM_INDEX_STEP_EXTRA_BITS) >> (S_FRAC_BITS - (PCM_INDEX_FRAC_BITS)) ); //  + PCM_INDEX_STEP_EXTRA_BITS
         //fprintf(stderr, "\rtime %.3f osc %d render_pcm7: preset %d len %d base_ix 0x%lx phase 0x%lx sfracofp 0x%lx step 0x%lx synthphase 0x%lx amp %.3f\n",

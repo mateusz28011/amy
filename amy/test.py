@@ -201,6 +201,73 @@ class TestPcmShift(AmyTest):
     amy_send_at(time=500, note=70, vel=1)
 
 
+class TestPcmRetriggerEnvelope(AmyTest):
+  """A new envelope must not unmute or amplify the preceding PCM tail."""
+
+  def test(self):
+    sr = amy.AMY_SAMPLE_RATE
+    block = amy.AMY_BLOCK_SIZE
+    t = np.arange(int(0.3 * sr)) / sr
+    # A smooth low-frequency tail, with a short attack starting at zero.
+    sample = 0.3 * np.sin(2 * np.pi * 40 * t) * np.minimum(t / 0.002, 1)
+    payload = (sample * 32767).astype('<i2').tobytes()
+    gated = '0,1,72,1,30,0,0,0'
+    partial = '0,1,87,1,30,0,0,0'
+    ungated = '0,1,0,1,0,1,0,0'
+    new_env = '0,1,200,1,30,0,0,0'
+    results = []
+    silent_onset_ok = True
+    for label, old_env, next_env, old_vel in (
+        ('silent', gated, new_env, 1), ('partial', partial, new_env, 1),
+        ('ungated', ungated, ungated, 1), ('gated to ungated', gated, ungated, 1),
+        ('ungated to gated', ungated, new_env, 1), ('velocity change', ungated, ungated, 0.5)):
+      _amy.stop()
+      _amy.start(0)
+      amy.load_sample_bytes(payload, preset=1024, midinote=36)
+      amy.send(osc=0, wave=amy.PCM, preset=1024, note=36, amp=1)
+      amy.send(osc=0, vel=old_vel, bp0=old_env)
+      first = amy.render(18 * block / sr)[:, 0]
+      amy.send(osc=0, vel=1, bp0=next_env)
+      second = amy.render(6 * block / sr)[:, 0]
+      jump = np.max(np.abs(np.diff(np.concatenate((first, second)))))
+      results.append((label, jump))
+      if label == 'silent':
+        # No zero-crossing wait is needed: a silent retrigger has the same
+        # attack timing as a fresh note (the envelopes both start at 1).
+        silent_onset_ok = np.array_equal(second[:block], first[:block])
+    is_ok = silent_onset_ok and all(jump <= 0.0075 for _, jump in results)
+    message = self.__class__.__name__ + ': ' + ', '.join(
+        '%s maxjump=%.5f' % result for result in results)
+    _amy.stop()
+    _amy.start(0)
+    amy.load_sample_bytes(payload, preset=1024, midinote=36)
+    amy.send(osc=0, wave=amy.PCM, preset=1024, note=36, bp0=ungated, vel=1)
+    amy.render(18 * block / sr)
+    amy.send(osc=0, bp0='0,1,12,1,10,0,0,0', vel=1)
+    short_note = amy.render(7 * block / sr)
+    # The restart is about 8 ms into the retrigger. A 22 ms envelope must
+    # still sound in block 3, then be silent by block 6 (PCM amplitude ramps
+    # across a block like the other oscillators, so the fade ends one block
+    # after the envelope does). Starting its clock at the trigger instead
+    # would make all of block 3 silent.
+    clock_ok = rms(short_note[3 * block:4 * block]) > 0.0001 and not np.any(short_note[6 * block:])
+    # A note-off can arrive before the deferred restart (the next crossing
+    # of this tail is more than one block away). It must still release.
+    _amy.stop()
+    _amy.start(0)
+    amy.load_sample_bytes(payload, preset=1024, midinote=36)
+    amy.send(osc=0, wave=amy.PCM, preset=1024, note=36,
+             mode=amy.PCM_LOOP_FOREVER, bp0='0,1,200,1,10,0', vel=1)
+    amy.render(18 * block / sr)
+    amy.send(osc=0, vel=1)
+    amy.render(block / sr)
+    amy.send(osc=0, vel=0)
+    tail = amy.render(0.1)
+    released = not np.any(tail[-block:])
+    return is_ok and clock_ok and released, message + ', immediate silent onset=%s, delayed envelope=%s, released=%s' % (
+        silent_onset_ok, clock_ok, released)
+
+
 class TestPcmPatchChange(AmyTest):
   """There was a bug where switching PCM preset would persist the base note of the preceding preset."""
 
